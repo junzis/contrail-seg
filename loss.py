@@ -1,78 +1,64 @@
 import torch
 import torch.nn.functional as F
 from torch.nn.modules.loss import _Loss
-from functools import partial
 
 
 class DiceLoss(_Loss):
     def __init__(
         self,
-        log_loss: bool = False,
-        from_logits: bool = True,
+        log_loss: bool = True,
         smooth: float = 0.0,
         eps: float = 1e-7,
-        dh_weight=0.6,
     ):
         """Compute Dice loss"""
         super().__init__()
-        self.from_logits = from_logits
         self.smooth = smooth
         self.eps = eps
         self.log_loss = log_loss
-        self.dh_weight = dh_weight
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         assert y_true.size(0) == y_pred.size(0)
 
-        if self.from_logits:
-            # Apply activations to get [0..1] class probabilities
-            y_pred = F.logsigmoid(y_pred).exp()
+        # Apply activations to get [0..1] class probabilities
+        # Using Log-Exp as this gives more numerically stable result and does not cause vanishing gradient on
+        # extreme values 0 and 1
+        y_pred = F.logsigmoid(y_pred).exp()
 
         # dimention 0 are images in a batch
-        dims = (1, 2, 3)
+        # dims = (1, 2, 3)
 
         predict, target = y_pred, y_true.type_as(y_pred)
 
         smooth = self.smooth
         eps = self.eps
 
-        intersection = torch.sum(predict * target, dims)
-        cardinality = torch.sum(predict + target, dims)
+        intersection = torch.nansum(predict * target)
+        cardinality = torch.nansum(predict + target)
         dice = (2 * intersection + smooth) / (cardinality + smooth).clamp_min(eps)
+
         if self.log_loss:
             loss = -torch.log(dice)
         else:
             loss = 1 - dice
 
-        mask = y_true.sum(dims) > 0
-        loss *= mask.to(loss.dtype)
+        # mask = y_true.sum() > 0
+        # loss *= mask.to(loss.dtype)
+        # agg_loss = loss.mean()
 
-        agg_loss = loss.mean()
-
-        return agg_loss
+        return loss
 
 
 class FocalLoss(_Loss):
     def __init__(
         self,
-        alpha=None,
         gamma=2.0,
-        ignore_index=None,
-        reduction="mean",
         normalized: bool = False,
-        reduced_threshold=None,
         eps=1e-6,
     ):
         """Compute Focal loss"""
         super().__init__()
 
-        assert self.reduction in ["mean", "sum", "batchwise_mean"]
-
-        self.ignore_index = ignore_index
-        self.alpha = alpha
         self.gamma = gamma
-        self.reduced_threshold = reduced_threshold
-        self.reduction = reduction
         self.normalized = normalized
         self.eps = eps
 
@@ -92,30 +78,17 @@ class FocalLoss(_Loss):
 
         assert pt.ndim == 2
 
-        # compute the loss
-        if self.reduced_threshold is None:
-            focal_term = (1.0 - pt).pow(self.gamma)
-        else:
-            focal_term = ((1.0 - pt) / self.reduced_threshold).pow(self.gamma)
-            focal_term[pt < self.reduced_threshold] = 1
+        focal_term = (1.0 - pt).pow(self.gamma)
 
         loss = focal_term * logpt
 
         assert loss.ndim == 2
 
-        if self.alpha is not None:
-            loss *= self.alpha * target + (1 - self.alpha) * (1 - target)
-
         if self.normalized:
             norm_factor = focal_term.sum(1).clamp_min(self.eps).view(batch_size, -1)
             loss /= norm_factor
 
-        if self.reduction == "mean":
-            agg_loss = loss.mean()
-        if self.reduction == "sum":
-            agg_loss = loss.sum()
-        if self.reduction == "batchwise_mean":
-            agg_loss = loss.sum(0)
+        agg_loss = loss.mean()
 
         return agg_loss
 
@@ -151,76 +124,45 @@ def hough_transform(batch, threshold=50, return_coordinates=False):
 
         accumulator = torch.transpose(accumulator, 0, 1)
 
+        # testing, return only the first
         if return_coordinates:
             hough_lines = torch.argwhere(accumulator > threshold)
             rho_idxs, theta_idxs = hough_lines[:, 0], hough_lines[:, 1]
             hough_rhos, hough_thetas = rhos[rho_idxs], thetas[theta_idxs]
             hough_coordinates = torch.stack((hough_rhos, hough_thetas))
             return hough_coordinates
-        else:
-            hough_matrix = torch.where(accumulator > threshold, 1, 0)
-            hough_matrices[i] = hough_matrix
-            return hough_matrices
+
+        hough_matrix = torch.where(accumulator > threshold, 1, 0)
+        hough_matrices[i] = hough_matrix
+
+    return hough_matrices
 
 
 class SRLoss(_Loss):
-    def __init__(
-        self,
-        log_loss: bool = False,
-        from_logits: bool = True,
-        smooth: float = 0.0,
-        eps: float = 1e-7,
-        dh_weight=0.5,
-    ):
+    def __init__(self, loss_base: str = "dice", weight=0.5):
         """Dice loss for image segmentation task with Hough Transform constraint."""
         super(SRLoss, self).__init__()
-        self.from_logits = from_logits
-        self.smooth = smooth
-        self.eps = eps
-        self.log_loss = log_loss
-        self.dh_weight = dh_weight
+        self.weight = weight
+
+        assert loss_base in ["dice", "focal"]
+        if loss_base == "dice":
+            self.loss_fn = DiceLoss(log_loss=True)
+
+        if loss_base == "focal":
+            self.loss_fn = FocalLoss(normalized=True)
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         assert y_true.size(0) == y_pred.size(0)
 
-        if self.from_logits:
-            # Apply activations to get [0..1] class probabilities
-            # Using Log-Exp as this gives more numerically stable result and does not cause vanishing gradient on
-            # extreme values 0 and 1
-            y_pred = F.logsigmoid(y_pred).exp()
-
-        # bs = y_true.size(0)
-        # dims = (1, 2, 3)
-
-        # y_true = y_true.view(bs, 1, -1)
-        # y_pred = y_pred.view(bs, 1, -1)
-
         predict, target = y_pred, y_true.type_as(y_pred)
-
-        smooth = self.smooth
-        eps = self.eps
-
-        intersection = torch.sum(predict * target)
-        cardinality = torch.sum(predict + target)
-        dice = (2 * intersection + smooth) / (cardinality + smooth).clamp_min(eps)
-        if self.log_loss:
-            dice_loss = -torch.log(dice.clamp_min(self.eps))
-        else:
-            dice_loss = 1 - dice
+        base_loss = self.loss_fn.forward(predict, target)
 
         # compute customized hough loss
         hough_predict = hough_transform(predict)
         hough_target = hough_transform(target)
 
-        h_intersection = torch.sum(hough_predict * hough_target)
-        h_cardinality = torch.sum(hough_predict + hough_target)
-        dice = (2 * h_intersection + smooth) / (h_cardinality + smooth).clamp_min(eps)
+        hough_loss = self.loss_fn.forward(hough_predict, hough_target)
 
-        if self.log_loss:
-            hough_dice_loss = -torch.log(dice.clamp_min(self.eps))
-        else:
-            hough_dice_loss = 1 - dice
-
-        loss = self.dh_weight * dice_loss + (1 - self.dh_weight) * hough_dice_loss
+        loss = self.weight * hough_loss + (1 - self.weight) * base_loss
 
         return loss

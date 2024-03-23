@@ -1,7 +1,11 @@
 tmp
 local
+local_*
 data/models
+data/landsat
 lightning_logs
+google-goes-contrail
+
 
 .DS_Store
 

@@ -1,76 +1,97 @@
 # %%
-import glob
 import warnings
-import torch
-import lightning
-from torch.utils.data import DataLoader
-from sklearn.model_selection import train_test_split
-from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 
-import contrail
+import click
+import lightning
+import torch
+from torch.utils.data import DataLoader
+
+import data
+from contrail import ContrailModel
 
 warnings.filterwarnings("ignore")
 
-# %%
-image_paths = sorted(glob.glob(f"data/train_*/image/*.png"))
-mask_paths = sorted(glob.glob(f"data/train_*/mask/*.png"))
-
-x_train, x_val, y_train, y_val = train_test_split(
-    image_paths, mask_paths, test_size=0.3, random_state=42
-)
-
-# Dataset for train images
-train_dataset = contrail.Dataset(
-    x_train,
-    y_train,
-    augmentation=contrail.get_train_augmentation(),
-    preprocessing=contrail.get_preprocessing(),
-)
-
-image, mask = train_dataset[0]
-contrail.visualize(train_image=image, train_mask=mask)
-
-# Dataset for validation images
-val_dataset = contrail.Dataset(
-    x_val,
-    y_val,
-    augmentation=contrail.get_val_augmentation(),
-    preprocessing=contrail.get_preprocessing(),
-)
-
-image, mask = val_dataset[0]
-contrail.visualize(val_image=image, val_mask=mask)
-
-train_dataloader = DataLoader(
-    train_dataset,
-    batch_size=16,
-    shuffle=True,
-    num_workers=16,
-)
-
-val_dataloader = DataLoader(
-    val_dataset,
-    batch_size=16,
-    shuffle=False,
-    num_workers=16,
-)
 
 # %%
 
-loss = "sr"
 
-# Training detection model
-model = contrail.ContrailModel(arch="UNet", in_channels=3, out_classes=1, loss=loss)
+@click.command()
+@click.option("--dataset", required=True)
+@click.option("--minute", required=False, type=int, help="minutes")
+@click.option("--epoch", required=False, type=int, help="minutes")
+@click.option("--loss", required=True, help="dice, focal, or sr")
+@click.option("--base", required=False, help="dice or focal (for sr loss)")
+def main(dataset, minute, epoch, loss, base):
 
-trainer = lightning.Trainer(max_steps=4000, log_every_n_steps=10)
+    print(
+        f"training: {dataset} data, {minute} minutes, {epoch} epoch, {loss} loss, {base} base"
+    )
 
-trainer.fit(
-    model,
-    train_dataloaders=train_dataloader,
-    val_dataloaders=val_dataloader,
-)
+    torch.cuda.empty_cache()
 
-# %%
-torch.save(
-    model.state_dict(), "data/model/contrail.torch.states.v[xx].[loss].[xxx].bin"
-)
+    if dataset == "own":
+        train_dataset, val_dataset = data.own_dataset()
+    elif dataset == "google":
+        train_dataset, val_dataset = data.google_dataset()
+    elif dataset.startswith("google:fewshot:"):
+        n = int(dataset.split(":")[-1])
+        train_dataset, val_dataset = data.google_dataset_few_shot(n=n)
+    else:
+        print(f"dataset: {dataset} unknown")
+        return
+
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=16,
+        shuffle=True,
+        num_workers=8,
+    )
+
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=16,
+        shuffle=True,
+        num_workers=8,
+    )
+
+    model = ContrailModel(arch="UNet", in_channels=1, out_classes=1, loss=loss)
+
+    # callback_save_model = lightning.callbacks.ModelCheckpoint(
+    #     dirpath="data/models/",
+    #     filename="google-dice-{epoch:02d}epoch.torch",
+    #     save_top_k=-1,
+    #     every_n_epochs=10,
+    # )
+
+    if minute is not None:
+        trainer = lightning.Trainer(
+            max_time=f"00:{(minute//60):02d}:{(minute%60):02d}:00",
+            log_every_n_steps=20,
+        )
+        max_val = minute
+        tag = "minute"
+
+    elif epoch is not None:
+        trainer = lightning.Trainer(
+            max_epochs=epoch,
+            log_every_n_steps=20,
+        )
+        max_val = epoch
+        tag = "epoch"
+
+    trainer.fit(
+        model,
+        train_dataloaders=train_dataloader,
+        val_dataloaders=val_dataloader,
+    )
+
+    if base is None:
+        f_out = f"data/models/{dataset}-{loss}-{max_val}{tag}.torch"
+    else:
+        f_out = f"data/models/{dataset}-{loss}:{base}-{max_val}{tag}.torch"
+
+    torch.save(model.state_dict(), f_out)
+
+
+if __name__ == "__main__":
+    main()
