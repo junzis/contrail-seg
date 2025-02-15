@@ -37,6 +37,7 @@ def get_train_augmentation(image_size=DEFAULT_IMG_SIZE):
             rotate_limit=180,
             shift_limit=0.3,
             border_mode=0,
+            value=0,
             p=1,
         ),
         albu.PadIfNeeded(
@@ -44,6 +45,7 @@ def get_train_augmentation(image_size=DEFAULT_IMG_SIZE):
             min_width=image_size,
             always_apply=True,
             border_mode=0,
+            value=0,
         ),
         albu.Resize(image_size, image_size),
         albu.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.3, p=0.5),
@@ -60,6 +62,7 @@ def get_val_augmentation(image_size=DEFAULT_IMG_SIZE):
             rotate_limit=180,
             shift_limit=0.3,
             border_mode=0,
+            value=0,
             p=1,
         ),
         albu.PadIfNeeded(
@@ -67,6 +70,7 @@ def get_val_augmentation(image_size=DEFAULT_IMG_SIZE):
             min_width=image_size,
             always_apply=True,
             border_mode=0,
+            value=0,
         ),
         albu.Resize(image_size, image_size),
     ]
@@ -81,6 +85,7 @@ def get_test_augmentation(image_size=DEFAULT_IMG_SIZE):
             min_width=image_size,
             always_apply=True,
             border_mode=0,
+            value=0,
         ),
         albu.Resize(image_size, image_size),
     ]
@@ -242,7 +247,7 @@ class GoogleDataset(BaseDataset):
             return image
 
 
-def own_dataset(train=True):
+def own_dataset(for_training=True):
     image_paths = sorted(glob.glob(f"data/goes/**/image/*.png"))
     mask_paths = sorted(glob.glob(f"data/goes/**/mask/*.png"))
 
@@ -253,14 +258,18 @@ def own_dataset(train=True):
     train_dataset = OwnDataset(
         x_train,
         y_train,
-        augmentation=get_train_augmentation() if train else get_test_augmentation(),
+        augmentation=get_train_augmentation()
+        if for_training
+        else get_test_augmentation(),
         preprocessing=get_preprocessing(),
     )
 
     val_dataset = OwnDataset(
         x_val,
         y_val,
-        augmentation=get_val_augmentation() if train else get_test_augmentation(),
+        augmentation=get_val_augmentation()
+        if for_training
+        else get_test_augmentation(),
         preprocessing=get_preprocessing(),
     )
 
